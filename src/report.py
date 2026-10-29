@@ -41,7 +41,14 @@ def sig(x) -> str:
     """p/q-values: scientific notation when tiny."""
     if x is None or pd.isna(x):
         return "n/a"
+    if x == 0:
+        return "< 1e-16"            # below floating-point resolution
     return f"{x:.2e}" if x < 1e-3 else f"{x:.3f}"
+
+
+def pp(x, digits=1) -> str:
+    """A difference between two rates, in percentage points."""
+    return "n/a" if x is None or pd.isna(x) else f"{x * 100:.{digits}f} percentage points"
 
 
 def duration(td) -> str:
@@ -64,7 +71,7 @@ def overview_value(metric: str, value) -> str:
 PERIOD_WORDS = {"D": "day", "W": "week", "MS": "month", "ME": "month", "M": "month"}
 
 
-def build_context(cfg, overview, cleaning, analysis, spc, capability) -> dict:
+def build_context(cfg, overview, metrics, cleaning, analysis, improve, spc, capability) -> dict:
     a, rep = analysis, cfg["report"]
     ov = overview.set_index("metric")["value"]
     screen = a["screen"]
@@ -79,11 +86,14 @@ def build_context(cfg, overview, cleaning, analysis, spc, capability) -> dict:
     top_sensors = a["ranking"][: cfg["spc"]["n_sensors"]]
     hyp = screen.set_index("sensor").loc[[s for s in top_sensors if s in set(screen["sensor"])]]
 
-    cut = int(round(len(a["raw_fail"]) * cfg["spc"]["baseline_frac"]))
-    fail_early, fail_late = float(a["raw_fail"][:cut].mean()), float(a["raw_fail"][cut:].mean())
-
+    sm = spc["summary"]
+    corr = a["corr"]
     return {
-        "fail_early": fail_early, "fail_late": fail_late,
+        "m": metrics, "improve": improve,
+        "n_rules_hold": int(improve["holds_up"].sum()) if len(improve) else 0,
+        "corr_show": corr[corr["overlap"]] if corr["overlap"].any() else corr.head(0),
+        "corr_top": corr.head(rep["corr_rows"]),
+        "n_overlap": int(corr["overlap"].sum()),
         "cfg": cfg, "title": rep["title"],
         "generated": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
         "ov": ov, "overview": overview,
@@ -109,8 +119,10 @@ def build_context(cfg, overview, cleaning, analysis, spc, capability) -> dict:
         "img_p": _img(spc["p_chart_figure"]),
         "img_imr": {s: _img(r["figure"]) for s, r in spc["charts"].items()},
         "period_word": PERIOD_WORDS.get(cfg["spc"]["p_chart_period"], cfg["spc"]["p_chart_period"]),
-        "n_flag_lower": int((spc["summary"]["fail_rate_flagged"] < spc["summary"]["fail_rate_not_flagged"]).sum()),
-        "pct": pct, "num": num, "sig": sig, "duration": duration, "overview_value": overview_value,
+        "n_flag_lower": int((sm["fail_rate_flagged"] < sm["fail_rate_not_flagged"]).sum()),
+        "n_flag_higher": int((sm["fail_rate_flagged"] > sm["fail_rate_not_flagged"]).sum()),
+        "n_cap_nonnormal": int((~capability["normal"]).sum()), "n_cap_rows": len(capability),
+        "pct": pct, "pp": pp, "num": num, "sig": sig, "duration": duration, "overview_value": overview_value,
     }
 
 

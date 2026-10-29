@@ -62,6 +62,7 @@ figcaption { font-size: 13px; color: var(--ink-2); margin-top: 6px; max-width: 8
     <li><b>Specification limits are assumed.</b> SECOM publishes no spec limits. The LSL and USL used for Cp, Cpk, Pp and Ppk are derived from passing runs in the baseline window
       ({% if cfg.capability.spec_method == "mean_sd" %}their mean ± {{ cfg.capability.mean_sd_k }} standard deviations{% else %}their {{ cfg.capability.lower_percentile }}th and {{ cfg.capability.upper_percentile }}th percentiles{% endif %}).
       Capability numbers therefore describe how well runs stay inside the envelope that passing baseline runs occupied, not compliance with engineering specs.</li>
+    <li><b>No measurement system analysis (MSA).</b> A gauge R&amp;R study needs the same parts measured repeatedly by the same system. SECOM has one reading per sensor per run, so measurement error cannot be separated from process variation. All variation below is treated as process variation, which is an assumption.</li>
     <li><b>Sensors are anonymous.</b> SECOM does not say what any sensor measures, so findings cannot be tied to a specific tool, chamber or physical quantity.</li>
     <li><b>Imputed values are not analysed.</b> Gaps are filled only for bookkeeping. The statistical tests, control charts and capability indices use measured values only; the predictive model fills gaps using medians learned from its training runs only.</li>
     <li><b>Time order.</b> Runs are sorted by timestamp. {{ num(ov["runs sharing a timestamp with another run"]) }} runs share a timestamp with another run; their order within a tie follows the original file.</li>
@@ -73,6 +74,16 @@ figcaption { font-size: 13px; color: var(--ink-2); margin-top: 6px; max-width: 8
 <p><b>Problem.</b> Over the recorded period ({{ ov["first run"].strftime("%Y-%m-%d") }} to {{ ov["last run"].strftime("%Y-%m-%d") }}), {{ num(ov["failed runs"]) }} of {{ num(ov["runs"]) }} production runs failed in-house line testing, a fail rate of {{ pct(ov["fail rate"]) }}.</p>
 <p><b>Goal of this project.</b> Find which of the {{ num(ov["sensors"]) }} process sensors are associated with failing runs, and propose how they could be monitored. The output is a short list of sensors worth engineering follow-up, not a root cause.</p>
 <p><b>CTQ.</b> Pass/fail result at line test. <b>Scope.</b> All runs and sensors in the dataset; no process, tool or recipe metadata is available.</p>
+<h3>Baseline performance of the CTQ</h3>
+<p>Each run is one defect opportunity (pass or fail), so:</p>
+<p class="note">DPMO = p × 1,000,000 &nbsp;·&nbsp; Z<sub>LT</sub> = Φ<sup>−1</sup>(1 − p) &nbsp;·&nbsp; sigma level = Z<sub>LT</sub> + {{ m.overall.shift }}<br>
+where p = fail rate, Φ<sup>−1</sup> = inverse of the standard normal cumulative distribution, Z<sub>LT</sub> = long-term Z, and {{ m.overall.shift }} is the conventional Six Sigma shift between long-term and short-term performance.</p>
+<div class="kpis">
+  <div class="kpi"><div class="v">{{ pct(m.overall["yield"]) }}</div><div class="l">first-pass yield</div></div>
+  <div class="kpi"><div class="v">{{ num(m.overall.dpmo, 0) }}</div><div class="l">DPMO</div></div>
+  <div class="kpi"><div class="v">{{ num(m.overall.z_long_term, 2) }}</div><div class="l">long-term Z</div></div>
+  <div class="kpi"><div class="v">{{ num(m.overall.sigma_level, 2) }}</div><div class="l">sigma level (with {{ m.overall.shift }} shift)</div></div>
+</div>
 <div class="kpis">
   <div class="kpi"><div class="v">{{ num(ov["runs"]) }}</div><div class="l">production runs</div></div>
   <div class="kpi"><div class="v">{{ num(ov["sensors"]) }}</div><div class="l">sensors per run</div></div>
@@ -83,7 +94,16 @@ figcaption { font-size: 13px; color: var(--ink-2); margin-top: 6px; max-width: 8
   <img src="{{ img_p }}" alt="Weekly fail-rate p-chart">
   <figcaption>Fail rate per {{ period_word }} with p-chart limits (p̄ ± {{ cfg.spc.sigma_multiplier }}√(p̄(1−p̄)/n), where p̄ is the overall fail rate and n is the number of runs in the period). {{ n_p_out }} of {{ pchart|length }} {{ period_word }}s fall outside the limits.</figcaption>
 </figure>
-<p>The fail rate is not constant over the period: it is {{ pct(fail_early) }} in the first {{ pct(cfg.spc.baseline_frac, 0) }} of runs and {{ pct(fail_late) }} in the rest. A changing fail rate matters for every later step: patterns learned from early runs may not carry over to later ones.</p>
+<h3>Is the fail rate stable over time?</h3>
+<p>Two-proportion z-test, first {{ pct(cfg.spc.baseline_frac, 0) }} of runs (to {{ m.drift.early_end.strftime("%Y-%m-%d") }}) against the rest:</p>
+<p class="note">z = (p₁ − p₂) / √(p̄(1 − p̄)(1/n₁ + 1/n₂))<br>where p₁, p₂ = fail rates of the two periods, n₁, n₂ = runs in each period, and p̄ = pooled fail rate of both periods together.</p>
+<div class="tbl"><table>
+<tr><th>Period</th><th>Runs</th><th>Fails</th><th>Fail rate</th><th>DPMO</th><th>Sigma level</th></tr>
+<tr><td>Early</td><td>{{ num(m.early.runs) }}</td><td>{{ num(m.early.fails) }}</td><td>{{ pct(m.early.fail_rate) }}</td><td>{{ num(m.early.dpmo, 0) }}</td><td>{{ num(m.early.sigma_level, 2) }}</td></tr>
+<tr><td>Late</td><td>{{ num(m.late.runs) }}</td><td>{{ num(m.late.fails) }}</td><td>{{ pct(m.late.fail_rate) }}</td><td>{{ num(m.late.dpmo, 0) }}</td><td>{{ num(m.late.sigma_level, 2) }}</td></tr>
+</table></div>
+<p>Difference = {{ pp(m.drift["diff"]) }} ({{ pct(m.drift.conf, 0) }} CI {{ pp(m.drift.ci_low) }} to {{ pp(m.drift.ci_high) }}), z = {{ num(m.drift.z, 2) }}, p = {{ sig(m.drift.p_value) }}.
+{% if m.drift.significant %}<b>The fail rate changed significantly between the two periods.</b> Patterns learned from early runs may not carry over to later runs, which is why the model below is tested on later runs only.{% else %}No significant change in fail rate was found between the two periods.{% endif %} The data does not record what changed, so this is a finding to investigate, not an improvement that can be credited to anything.</p>
 
 <!-- ======================================================== MEASURE -->
 <h2><span class="phase">M</span>Measure</h2>
@@ -135,6 +155,17 @@ figcaption { font-size: 13px; color: var(--ink-2); margin-top: 6px; max-width: 8
 {% endfor %}
 </table></div>
 <p class="note">Std. mean diff. d = (mean of failing runs − mean of passing runs) ÷ pooled standard deviation. Positive d = failing runs read higher. Full table: <code>outputs/screening.csv</code>.</p>
+<h3>Do the significant sensors overlap?</h3>
+<p>If two sensors move together, they are one finding, not two. Spearman rank correlation (ρ) between every pair of the {{ n_sig_both }} sensors significant in both tests; pairs with |ρ| ≥ {{ cfg.analyze.corr_threshold }} are marked as overlapping.</p>
+{% if corr_top|length %}
+<div class="tbl"><table>
+<tr><th>Sensor A</th><th>Sensor B</th><th>Spearman ρ</th><th>Overlap</th></tr>
+{% for _, r in corr_top.iterrows() %}
+<tr><td>{{ r.sensor_a }}</td><td>{{ r.sensor_b }}</td><td>{{ num(r.rho, 2) }}</td><td>{{ "yes" if r.overlap else "no" }}</td></tr>
+{% endfor %}
+</table></div>
+<p>{{ n_overlap }} pair{{ "" if n_overlap == 1 else "s" }} overlap at this threshold. The strongest pairs are listed; the full table is in <code>outputs/sensor_overlap.csv</code>.</p>
+{% endif %}
 
 <h3>2. All sensors together: L1-regularised logistic regression</h3>
 <p>Logistic regression estimates the probability that a run fails from all {{ num(n_kept) }} kept sensors at once. The L1 penalty shrinks most coefficients to exactly zero, leaving a short list of sensors. Failing runs are weighted up ("{{ cfg.analyze.class_weight }}" class weights) so the model cannot score well by predicting "pass" for everything.</p>
@@ -148,7 +179,7 @@ figcaption { font-size: 13px; color: var(--ink-2); margin-top: 6px; max-width: 8
 {% if holds_up %}
 <p><b>Result:</b> the model keeps useful ranking ability on later runs (held-out ROC AUC {{ num(test.roc_auc) }} ≥ {{ cfg.report.min_useful_auc }}).</p>
 {% else %}
-<p><b>Result: the model does not hold up on later runs.</b> Held-out ROC AUC is {{ num(test.roc_auc) }}, below the {{ cfg.report.min_useful_auc }} set in config as the bar for useful predictive power. The sensor relationships found in the earlier period do not predict failures in the later period.{% if unstable|length %} One possible reason is that the process behaves differently over time; the control charts below are consistent with this, since {{ unstable|length }} of {{ spc|length }} charted sensors have an unstable baseline.{% endif %} Any sensor list from this data should be treated as a starting point for investigation, not as a predictive tool.</p>
+<p><b>Result: the model does not hold up on later runs.</b> Held-out ROC AUC is {{ num(test.roc_auc) }}, below the {{ cfg.report.min_useful_auc }} set in config as the bar for useful predictive power. The sensor relationships found in the earlier period do not predict failures in the later period.{% if m.drift.significant %} One possible reason is that the process behaves differently over time: the fail rate itself changed significantly between the early and late periods (Define phase), and the control charts below show sensor levels shifting.{% endif %} Any sensor list from this data should be treated as a starting point for investigation, not as a predictive tool.</p>
 {% endif %}
 
 <h3>3. Pareto of model weight and selection stability</h3>
@@ -173,6 +204,20 @@ figcaption { font-size: 13px; color: var(--ink-2); margin-top: 6px; max-width: 8
 <tr><td>{{ s }}</td><td>{{ num(r.median_pass) }}</td><td>{{ num(r.median_fail) }}</td><td>{{ num(r.effect_size_d, 2) }}</td><td>{{ sig(r.mw_q) }}</td><td class="l">What does this sensor measure, and is a {{ "higher" if r.effect_size_d > 0 else "lower" }} reading on failing runs physically plausible as a contributor or a symptom?</td></tr>
 {% endfor %}
 </table></div>
+<h3>Would a simple monitoring rule have caught failures?</h3>
+<p>Without experiments, the process cannot be changed here, but a monitoring rule can be tested. For each priority sensor, one threshold was chosen on the <b>training runs</b> (maximising Youden's J), then applied unchanged to the <b>later held-out runs</b>.</p>
+<p class="note">J = TPR − FPR &nbsp;·&nbsp; lift = precision ÷ fail rate<br>where TPR (recall) = share of failing runs flagged, FPR (false-alarm rate) = share of passing runs flagged, precision = share of flagged runs that failed. Lift of 1 means no better than flagging runs at random. Held-out p-values are from Fisher's exact test, corrected with Benjamini-Hochberg across the sensors tried.</p>
+<div class="tbl"><table>
+<tr><th>Sensor</th><th>Rule (from training runs)</th><th>Later runs: fails</th><th>Flagged</th><th>Fails caught</th><th>Recall</th><th>False-alarm rate</th><th>Lift</th><th>q-value</th><th>Holds up</th></tr>
+{% for _, r in improve.iterrows() %}
+<tr><td>{{ r.sensor }}</td><td>flag if {{ r.rule }}</td><td>{{ num(r.test_fails) }}</td><td>{{ num(r.test_flagged) }}</td><td>{{ num(r.test_fails_caught) }}</td><td>{{ pct(r.test_recall) }}</td><td>{{ pct(r.test_false_alarm_rate) }}</td><td>{{ num(r.test_lift, 2) }}</td><td>{{ sig(r.test_fisher_q) }}</td><td>{{ "yes" if r.holds_up else "no" }}</td></tr>
+{% endfor %}
+</table></div>
+{% if n_rules_hold %}
+<p><b>{{ n_rules_hold }} of {{ improve|length }} single-sensor rules still flag failures well above chance on runs they were not tuned on.</b> These are candidates for a run-level hold-and-inspect rule. That would be a containment and early-warning improvement: it changes what gets inspected, not how often the process fails. Its value depends on the cost of a missed failure against the cost of a false alarm, which this data does not contain.</p>
+{% else %}
+<p><b>None of the single-sensor rules holds up on later runs.</b> Thresholds tuned on early runs do not separate failing from passing runs later on.</p>
+{% endif %}
 <p><b>Recommended next steps.</b></p>
 <ol>
   <li>Map each sensor above to its physical meaning with the process owner. Without names, no change to the process can be proposed.</li>
@@ -184,36 +229,43 @@ figcaption { font-size: 13px; color: var(--ink-2); margin-top: 6px; max-width: 8
 <!-- ======================================================== CONTROL -->
 <h2><span class="phase">C</span>Control</h2>
 <h3>Control charts (I-MR) for the priority sensors</h3>
-<p>Phase I limits were calculated from <b>passing runs in the first {{ pct(cfg.spc.baseline_frac, 0) }} of the timeline</b>, then applied to all runs. Centre line = baseline mean; σ<sub>within</sub> = MR̄ / d₂ with d₂ = {{ cfg.spc.d2 }}; limits = centre ± {{ cfg.spc.sigma_multiplier }}σ<sub>within</sub>; MR chart upper limit = D₄ × MR̄ with D₄ = {{ cfg.spc.D4 }}. Western Electric rules: (1) a point beyond 3σ; (2) 2 of 3 beyond 2σ on one side; (3) 4 of 5 beyond 1σ on one side; (4) 8 in a row on one side.</p>
+<p>Phase I limits must come from a period when the process was stable. {% if cfg.spc.baseline_method == "stable_window" %}For each sensor, the code slides a window of {{ cfg.spc.stable_window_size }} passing, measured runs along the timeline and keeps the window with the lowest stability ratio (overall SD ÷ σ<sub>within</sub>; close to 1 for a stable process, higher when the level drifts or shifts). Limits come from <b>passing runs in that window</b> and are applied to all runs.{% else %}Limits were calculated from <b>passing runs in the first {{ pct(cfg.spc.baseline_frac, 0) }} of the timeline</b>, then applied to all runs.{% endif %} Centre line = baseline mean; σ<sub>within</sub> = MR̄ / d₂ with d₂ = {{ cfg.spc.d2 }}; limits = centre ± {{ cfg.spc.sigma_multiplier }}σ<sub>within</sub>; MR chart upper limit = D₄ × MR̄ with D₄ = {{ cfg.spc.D4 }}. Western Electric rules: (1) a point beyond 3σ; (2) 2 of 3 beyond 2σ on one side; (3) 4 of 5 beyond 1σ on one side; (4) 8 in a row on one side.</p>
 {% for s, img in img_imr.items() %}
 <figure><img src="{{ img }}" alt="I-MR chart for {{ s }}"></figure>
 {% endfor %}
 <div class="tbl"><table>
-<tr><th>Sensor</th><th>Centre</th><th>LCL</th><th>UCL</th><th>Baseline SD ÷ σ<sub>within</sub></th><th>Points</th><th>Rule 1</th><th>Rule 2</th><th>Rule 3</th><th>Rule 4</th><th>Any rule</th><th>Fail rate, flagged points</th><th>Fail rate, other points</th></tr>
+<tr><th>Sensor</th><th>Baseline window</th><th>Centre</th><th>LCL</th><th>UCL</th><th>Baseline SD ÷ σ<sub>within</sub></th><th>Points</th><th>Rule 1</th><th>Rule 2</th><th>Rule 3</th><th>Rule 4</th><th>Any rule</th><th>Fail rate, flagged points</th><th>Fail rate, other points</th></tr>
 {% for _, r in spc.iterrows() %}
-<tr><td>{{ r.sensor }}</td><td>{{ num(r.center) }}</td><td>{{ num(r.lcl) }}</td><td>{{ num(r.ucl) }}</td><td>{{ num(r.baseline_stability_ratio, 2) }}</td><td>{{ num(r.n_points) }}</td><td>{{ num(r.n_rule1) }}</td><td>{{ num(r.n_rule2) }}</td><td>{{ num(r.n_rule3) }}</td><td>{{ num(r.n_rule4) }}</td><td>{{ num(r.n_any_rule) }}</td><td>{{ pct(r.fail_rate_flagged) }}</td><td>{{ pct(r.fail_rate_not_flagged) }}</td></tr>
+<tr><td>{{ r.sensor }}</td><td>{{ r.baseline_start.strftime("%Y-%m-%d") }} to {{ r.baseline_end.strftime("%Y-%m-%d") }}</td><td>{{ num(r.center) }}</td><td>{{ num(r.lcl) }}</td><td>{{ num(r.ucl) }}</td><td>{{ num(r.baseline_stability_ratio, 2) }}</td><td>{{ num(r.n_points) }}</td><td>{{ num(r.n_rule1) }}</td><td>{{ num(r.n_rule2) }}</td><td>{{ num(r.n_rule3) }}</td><td>{{ num(r.n_rule4) }}</td><td>{{ num(r.n_any_rule) }}</td><td>{{ pct(r.fail_rate_flagged) }}</td><td>{{ pct(r.fail_rate_not_flagged) }}</td></tr>
 {% endfor %}
 </table></div>
 {% if unstable|length %}
-<p><b>The baseline is not stable for {{ unstable|length }} of {{ spc|length }} charted sensors</b> ({{ unstable.sensor|join(", ") }}): their overall baseline standard deviation is more than {{ cfg.report.max_stability_ratio }} times the short-term σ<sub>within</sub>. In SPC terms, Phase I is not in control, so these limits are provisional. Large rule 3 and rule 4 counts are the pattern a sustained shift in level produces, as opposed to isolated outliers; compare the baseline and later means in the capability table. A proper next step is to find the period where each sensor runs stably and recalculate limits from it.</p>
+<p><b>The baseline is not stable for {{ unstable|length }} of {{ spc|length }} charted sensors</b> ({{ unstable.sensor|join(", ") }}): their overall baseline standard deviation is more than {{ cfg.report.max_stability_ratio }} times the short-term σ<sub>within</sub>. In SPC terms, Phase I is not in control, so these limits are provisional.</p>
+{% else %}
+<p>All {{ spc|length }} baselines have a stability ratio at or below {{ cfg.report.max_stability_ratio }}, so the Phase I limits rest on a stable period. Many points outside the window break the rules; large rule 3 and rule 4 counts are the pattern sustained level shifts produce, which matches the change in fail rate found in the Define phase.</p>
 {% endif %}
-<p class="note">The last two columns check whether rule-flagged points coincide with failures more often than other points. {% if n_flag_lower %}For {{ n_flag_lower }} of {{ spc|length }} sensors, flagged points have a <i>lower</i> fail rate than unflagged points, so for those sensors a chart signal in this data is not a marker of a failing run. {% endif %}These are associations only.</p>
+<p class="note">The last two columns check whether rule-flagged points coincide with failures more often than other points. {% if n_flag_higher %}For {{ n_flag_higher }} of {{ spc|length }} sensors, rule-flagged points have a higher fail rate than unflagged points. {% endif %}{% if n_flag_lower %}For {{ n_flag_lower }} of {{ spc|length }}, flagged points have a <i>lower</i> fail rate, so on those sensors a chart signal is not a marker of a failing run. {% endif %}These are associations only.</p>
 
 <h3>Process capability (against assumed limits)</h3>
-<p>Cp = (USL − LSL) / 6σ<sub>within</sub>; Cpk = min(USL − mean, mean − LSL) / 3σ<sub>within</sub>; Pp and Ppk use the same formulas with σ<sub>overall</sub> (sample standard deviation) instead. σ<sub>within</sub> = MR̄ / d₂ reflects short-term, run-to-run variation; σ<sub>overall</sub> also includes drift. LSL and USL are the <b>assumed</b> limits described at the top of this page. Because they are derived from the baseline passing runs, the baseline's own Pp is close to 1 by construction; the informative rows are the later periods.</p>
+<p>Cp = (USL − LSL) / 6σ<sub>within</sub>; Cpk = min(USL − mean, mean − LSL) / 3σ<sub>within</sub>; Pp and Ppk use the same formulas with σ<sub>overall</sub> (sample standard deviation) instead. σ<sub>within</sub> = MR̄ / d₂ reflects short-term, run-to-run variation; σ<sub>overall</sub> also includes drift. LSL and USL are the <b>assumed</b> limits described at the top of this page. Because they are derived from the baseline passing runs, the baseline's own Pp is close to 1 by construction; the informative rows are the runs outside the baseline window.</p>
+<p>Cp/Cpk/Pp/Ppk assume normally distributed data. Each row is tested with Anderson-Darling (normal if p ≥ {{ cfg.capability.normality_alpha }}); {{ n_cap_nonnormal }} of {{ n_cap_rows }} rows are not normal. For those rows, read the percentile-based columns, which make no normality assumption:</p>
+<p class="note">Pp<sub>pct</sub> = (USL − LSL) / (P<sub>{{ cfg.capability.upper_percentile }}</sub> − P<sub>{{ cfg.capability.lower_percentile }}</sub>) &nbsp;·&nbsp; Ppk<sub>pct</sub> = min((USL − M) / (P<sub>{{ cfg.capability.upper_percentile }}</sub> − M), (M − LSL) / (M − P<sub>{{ cfg.capability.lower_percentile }}</sub>))<br>where P<sub>k</sub> = the k-th percentile of the data and M = the median. The two percentiles bracket the same 99.73% of data that ±3σ covers for a normal distribution.</p>
 <div class="tbl"><table>
-<tr><th>Sensor</th><th class="l">Period</th><th>Assumed LSL</th><th>Assumed USL</th><th>n</th><th>Mean</th><th>Cp</th><th>Cpk</th><th>Pp</th><th>Ppk</th><th>Outside limits</th></tr>
+<tr><th>Sensor</th><th class="l">Period</th><th>Assumed LSL</th><th>Assumed USL</th><th>n</th><th>Mean</th><th>Cp</th><th>Cpk</th><th>Pp</th><th>Ppk</th><th>AD p</th><th>Normal</th><th>Pp<sub>pct</sub></th><th>Ppk<sub>pct</sub></th><th>Outside limits</th></tr>
 {% for _, r in cap.iterrows() %}
-<tr><td>{{ r.sensor }}</td><td class="l">{{ r.period }}</td><td>{{ num(r.lsl_assumed) }}</td><td>{{ num(r.usl_assumed) }}</td><td>{{ num(r.n) }}</td><td>{{ num(r["mean"]) }}</td><td>{{ num(r.Cp, 2) }}</td><td>{{ num(r.Cpk, 2) }}</td><td>{{ num(r.Pp, 2) }}</td><td>{{ num(r.Ppk, 2) }}</td><td>{{ pct(r.pct_outside) }}</td></tr>
+<tr><td>{{ r.sensor }}</td><td class="l">{{ r.period }}</td><td>{{ num(r.lsl_assumed) }}</td><td>{{ num(r.usl_assumed) }}</td><td>{{ num(r.n) }}</td><td>{{ num(r["mean"]) }}</td><td>{{ num(r.Cp, 2) }}</td><td>{{ num(r.Cpk, 2) }}</td><td>{{ num(r.Pp, 2) }}</td><td>{{ num(r.Ppk, 2) }}</td><td>{{ sig(r.ad_p) }}</td><td>{{ "yes" if r.normal else "no" }}</td><td>{{ num(r.Pp_pct, 2) }}</td><td>{{ num(r.Ppk_pct, 2) }}</td><td>{{ pct(r.pct_outside) }}</td></tr>
 {% endfor %}
 </table></div>
-<p class="note">For the "failing runs" rows, σ<sub>within</sub> is computed from consecutive failing runs, which are not adjacent in production; treat those Cp/Cpk values as rough.</p>
+<p class="note">For "failing runs" and "outside baseline window" rows, σ<sub>within</sub> is computed from runs that are not all adjacent in production; treat those Cp/Cpk values as rough. With a few hundred runs, the extreme percentiles are close to the minimum and maximum, so the percentile indices are also approximate.</p>
 
 <h3>Proposed control plan (draft)</h3>
 <div class="tbl"><table>
 <tr><th>Sensor</th><th>Chart</th><th>Centre</th><th>LCL</th><th>UCL</th><th class="l">Rules</th><th class="l">Reaction</th></tr>
 {% for _, r in spc.iterrows() %}
 <tr><td>{{ r.sensor }}</td><td>I-MR</td><td>{{ num(r.center) }}</td><td>{{ num(r.lcl) }}</td><td>{{ num(r.ucl) }}</td><td class="l">Western Electric {{ cfg.spc.rules|join(", ") }}</td><td class="l">Hold and review the run; record what the review found.{% if r.sensor in unstable.sensor.tolist() %} Limits provisional: recalculate from a stable period first.{% endif %}</td></tr>
+{% endfor %}
+{% for _, r in improve[improve.holds_up].iterrows() %}
+<tr><td>{{ r.sensor }}</td><td>Run-level rule</td><td class="l" colspan="3">flag if {{ r.rule }} (set on training runs)</td><td class="l">—</td><td class="l">Hold flagged run for extra inspection. On later runs this caught {{ num(r.test_fails_caught) }} of {{ num(r.test_fails) }} failures at a {{ pct(r.test_false_alarm_rate) }} false-alarm rate.</td></tr>
 {% endfor %}
 <tr><td>Line fail rate</td><td>p-chart (per {{ period_word }})</td><td>{{ pct(pchart.p_bar.iloc[0]) }}</td><td class="l" colspan="2">varies with runs per period</td><td class="l">—</td><td class="l">Investigate any period outside limits.</td></tr>
 </table></div>

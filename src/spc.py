@@ -1,7 +1,9 @@
 """Control phase: Individuals and Moving Range (I-MR) charts with Western Electric rules.
 
 How the limits are set (Phase I -> Phase II):
-  * Baseline = PASSING runs in the first `baseline_frac` of the timeline, measured values only.
+  * Baseline = PASSING runs, measured values only, in a baseline window chosen by
+    spc.baseline_method: the most stable window found in the data (stable_window), or
+    the first `baseline_frac` of the timeline (first_frac).
   * From the baseline:   X-bar = mean,  MR-bar = mean of |x_i - x_(i-1)|,
                          sigma_within = MR-bar / d2      (d2 = 1.128 for ranges of 2 points)
                          I chart:  UCL/LCL = X-bar +/- 3 * sigma_within
@@ -93,45 +95,82 @@ def western_electric(x: np.ndarray, center: float, sigma: float, rules=(1, 2, 3,
     return out
 
 
+def stability_ratio(x: np.ndarray, d2: float) -> float:
+    """SD_overall / sigma_within, where sigma_within = MR-bar / d2.
+
+    For a stable process with independent points this is close to 1. Drift or shifts
+    inflate the overall SD but barely touch run-to-run moving ranges, so the ratio rises.
+    """
+    x = np.asarray(x, dtype=float)
+    sw = moving_ranges(x).mean() / d2
+    return float(np.std(x, ddof=1) / sw) if sw > 0 else np.nan
+
+
+def find_stable_window(x: np.ndarray, size: int, step: int, d2: float) -> dict:
+    """Slide a window of `size` points along x (step `step`) and return the window with the
+    lowest stability ratio. Earliest window wins ties. If x is shorter than size, use all of x."""
+    x = np.asarray(x, dtype=float)
+    n = len(x)
+    if n <= size:
+        return {"start": 0, "end": n, "ratio": stability_ratio(x, d2)}
+    starts = list(range(0, n - size + 1, step))
+    if starts[-1] != n - size:
+        starts.append(n - size)              # make sure the final stretch is a candidate
+    ratios = [stability_ratio(x[s:s + size], d2) for s in starts]
+    best = int(np.nanargmin(ratios))
+    return {"start": starts[best], "end": starts[best] + size, "ratio": ratios[best]}
+
+
 def chart_sensor(df: pd.DataFrame, sensor: str, cfg_s: dict) -> dict:
     """Build the I-MR result for one sensor. df must be time-sorted and NOT imputed."""
-    # baseline = the first baseline_frac of ALL runs by position (same rule capability.py uses)
-    cut = int(round(len(df) * cfg_s["baseline_frac"]))
     d = df[["run_id", "timestamp", "fail", sensor]].copy()
-    d["in_base"] = np.arange(len(d)) < cut
+    d["pos"] = np.arange(len(d))                       # row position in the full timeline
     d = d.dropna(subset=[sensor]).reset_index(drop=True)
-    cut_time = df["timestamp"].iloc[cut - 1]
-    in_base = d.pop("in_base")
+
+    method = cfg_s.get("baseline_method", "first_frac")
+    if method == "first_frac":
+        cut = int(round(len(df) * cfg_s["baseline_frac"]))
+        start_pos, end_pos = 0, cut - 1
+    elif method == "stable_window":
+        passing = d[d["fail"] == 0]
+        w = find_stable_window(passing[sensor].to_numpy(), cfg_s["stable_window_size"],
+                               cfg_s["stable_window_step"], cfg_s["d2"])
+        start_pos = int(passing["pos"].iloc[w["start"]])
+        end_pos = int(passing["pos"].iloc[w["end"] - 1])
+    else:
+        raise ValueError(f"Unknown baseline_method {method!r}")
+
+    in_base = (d["pos"] >= start_pos) & (d["pos"] <= end_pos)
     base = d.loc[in_base & (d["fail"] == 0), sensor].to_numpy()
     lim = imr_limits(base, cfg_s["d2"], cfg_s["D4"], cfg_s["sigma_multiplier"])
 
     x = d[sensor].to_numpy()
     flags = western_electric(x, lim.center, lim.sigma, tuple(cfg_s["rules"]))
-    mr = np.concatenate([[np.nan], moving_ranges(x)])
     d = pd.concat([d, flags], axis=1)
-    d["mr"] = mr
+    d["mr"] = np.concatenate([[np.nan], moving_ranges(x)])
     d["mr_out"] = d["mr"] > lim.mr_ucl
     d["baseline"] = in_base
 
-    after = d[~in_base]
+    outside = d[~in_base]
     flagged = d[d["any"]]
-    # Phase I check: if the baseline's overall SD is much larger than its within SD
-    # (MR-bar/d2), the baseline itself was not stable, so its limits are suspect.
-    sd_overall = float(np.std(base, ddof=1))
     summary = {
-        "sensor": sensor, "center": lim.center, "sigma_within": lim.sigma,
-        "baseline_sd_overall": sd_overall,
-        "baseline_stability_ratio": sd_overall / lim.sigma if lim.sigma > 0 else np.nan,
+        "sensor": sensor, "baseline_method": method,
+        "baseline_start": df["timestamp"].iloc[start_pos], "baseline_end": df["timestamp"].iloc[end_pos],
+        "center": lim.center, "sigma_within": lim.sigma,
+        "baseline_sd_overall": float(np.std(base, ddof=1)),
+        # Phase I check: a ratio well above 1 means the baseline itself was not stable
+        "baseline_stability_ratio": stability_ratio(base, cfg_s["d2"]),
         "lcl": lim.lcl, "ucl": lim.ucl, "mr_bar": lim.mr_bar, "mr_ucl": lim.mr_ucl,
         "n_baseline": lim.n_baseline, "n_points": len(d),
         **{f"n_{c}": int(d[c].sum()) for c in flags.columns if c != "any"},
         "n_any_rule": int(d["any"].sum()),
         "n_mr_out": int(d["mr_out"].sum()),
-        "pct_after_baseline_beyond_3sigma": float(after["rule1"].mean()) if len(after) else np.nan,
+        "pct_outside_baseline_beyond_3sigma": float(outside["rule1"].mean()) if len(outside) else np.nan,
         "fail_rate_flagged": float(flagged["fail"].mean()) if len(flagged) else np.nan,
         "fail_rate_not_flagged": float(d.loc[~d["any"], "fail"].mean()),
     }
-    return {"points": d, "limits": lim, "summary": summary, "baseline_end": cut_time}
+    return {"points": d, "limits": lim, "summary": summary,
+            "baseline_pos": (start_pos, end_pos)}
 
 
 def plot_imr(res: dict, path) -> None:
@@ -140,7 +179,8 @@ def plot_imr(res: dict, path) -> None:
                                    gridspec_kw={"height_ratios": [2, 1]})
     sensor = res["summary"]["sensor"]
     for ax in (ax1, ax2):
-        ax.axvspan(d["timestamp"].min(), res["baseline_end"], color=C_GRID, alpha=0.6, lw=0)
+        ax.axvspan(res["summary"]["baseline_start"], res["summary"]["baseline_end"],
+                   color=C_GRID, alpha=0.6, lw=0)
         ax.grid(axis="y", color=C_GRID, lw=0.8)
         for s in ("top", "right"):
             ax.spines[s].set_visible(False)

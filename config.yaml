@@ -33,7 +33,21 @@ clean:
   # How remaining missing values are filled: "median" or "mean".
   impute_strategy: median
 
+metrics:
+  # Baseline performance of the CTQ (pass/fail at line test). One defect
+  # opportunity per run, so DPMO = fail rate x 1,000,000.
+  opportunities_per_run: 1
+  # Conventional 1.5-sigma shift used to quote "short-term" sigma level.
+  # Long-term Z is also reported, so the convention is visible, not hidden.
+  sigma_shift: 1.5
+  # Drift test: fail rate in the first part of the timeline vs the rest
+  # (split at spc.baseline_frac). Two-proportion z-test.
+  drift_alpha: 0.05
+
 analyze:
+  # Sensors significant in both tests are checked for overlap: pairs with
+  # |Spearman rho| >= this are reported as likely carrying the same signal.
+  corr_threshold: 0.70
   # False discovery rate for Benjamini-Hochberg (share of "significant" sensors
   # we accept could be false positives). 0.05 = 5%.
   fdr_q: 0.05
@@ -60,9 +74,15 @@ analyze:
 spc:
   # Charts are drawn for the top N sensors from the analysis ranking.
   n_sensors: 4
-  # Phase I baseline: control limits are calculated from PASSING runs in the first
-  # part of the timeline, then applied to every run (Phase II monitoring).
-  baseline_frac: 0.50
+  # Phase I baseline: control limits are calculated from PASSING runs in a baseline
+  # window, then applied to every run (Phase II monitoring).
+  #   stable_window: search the timeline for the window of passing, measured
+  #                  points with the lowest stability ratio (SD_overall / sigma_within)
+  #   first_frac:    use the first `baseline_frac` of the timeline
+  baseline_method: stable_window
+  stable_window_size: 250     # passing, measured points per candidate window
+  stable_window_step: 25      # how far each candidate window moves along the timeline
+  baseline_frac: 0.50         # used by first_frac, and as the early/late split for drift checks
   sigma_multiplier: 3
   d2: 1.128                   # bias constant for moving range of 2 (n=2)
   D4: 3.267                   # MR chart upper limit constant for n=2
@@ -85,11 +105,23 @@ capability:
   mean_sd_k: 3
   lower_percentile: 0.135     # used only when spec_method is percentile
   upper_percentile: 99.865
+  # Normality: Anderson-Darling test per sensor and period. When p < this, the
+  # normal-theory indices are flagged and percentile-based Pp/Ppk are shown too
+  # (spread measured as P99.865 - P0.135 instead of 6 standard deviations).
+  normality_alpha: 0.05
+
+improve:
+  # Monitoring-rule check: for each priority sensor, a single threshold is chosen on
+  # TRAINING runs (maximises Youden's J = true-positive rate - false-positive rate),
+  # then scored on the held-out LATER runs. Tests whether a simple run-level flag
+  # would have caught failures, without changing the process.
+  n_sensors: 4
 
 report:
   title: "SECOM wafer fab: a DMAIC analysis of sensor data against yield failures"
   file: secom_dmaic_report.html
   screen_rows: 10             # rows shown in the screening table
+  corr_rows: 6                # strongest sensor-pair correlations shown
   # Wording thresholds: the report's conclusions switch on these, not on hand-typed text.
   min_useful_auc: 0.60        # held-out ROC AUC below this = "no useful predictive power"
   max_stability_ratio: 1.30   # baseline SD_overall / SD_within above this = "baseline not stable"

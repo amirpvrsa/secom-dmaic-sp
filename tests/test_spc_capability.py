@@ -11,7 +11,9 @@ import pandas as pd
 import pytest
 
 from src.capability import capability_indices, derive_spec_limits, run_capability
-from src.spc import chart_sensor, imr_limits, moving_ranges, western_electric
+from src.capability import anderson_darling_p, percentile_indices
+from src.spc import (chart_sensor, find_stable_window, imr_limits, moving_ranges,
+                     stability_ratio, western_electric)
 
 X = [10, 12, 11, 13, 9]
 
@@ -102,14 +104,18 @@ def test_chart_uses_only_passing_baseline_runs(series):
     assert bool(r["points"].loc[r["points"]["run_id"] == 3, "rule1"].iloc[0])
 
 
-def test_capability_table_periods(series):
-    cfg = {"capability": {"spec_method": "mean_sd", "mean_sd_k": 3},
-           "spc": {"baseline_frac": 0.5, "d2": 1.128}}
-    t = run_capability(series, ["s"], cfg)
-    assert "baseline, passing runs" in t["period"].tolist()
+def test_capability_uses_spc_baseline_window(series):
+    cfg_s = {"baseline_frac": 0.5, "d2": 1.128, "D4": 3.267, "sigma_multiplier": 3,
+             "rules": [1, 2, 3, 4]}
+    chart = chart_sensor(series, "s", cfg_s)
+    cfg = {"capability": {"spec_method": "mean_sd", "mean_sd_k": 3, "normality_alpha": 0.05,
+                          "lower_percentile": 0.135, "upper_percentile": 99.865},
+           "spc": cfg_s}
+    t = run_capability(series, {"s": chart}, cfg)
     # limits must come from the passing baseline only (run 3's 500 excluded)
     base = np.array([10, 12, 11, 13, 9, 10, 12, 11], dtype=float)
     assert t["lsl_assumed"].iloc[0] == pytest.approx(base.mean() - 3 * base.std(ddof=1))
+    assert t["period"].iloc[0] == "baseline window, passing runs"
 
 
 def test_zero_spread_gives_nan_not_infinity():
@@ -132,3 +138,40 @@ def test_p_chart_hand():
     assert t["ucl"].tolist() == pytest.approx([0.384605, 0.242302], rel=1e-5)
     assert t["lcl"].tolist() == [0.0, 0.0]
     assert not t["out"].any()
+
+
+def test_stability_ratio_hand():
+    # trend 0..5: MRs all 1 -> sigma_within = 1/1.128 = 0.88652; SD = sqrt(17.5/5) = 1.87083
+    # ratio = 1.87083 / 0.88652 = 2.1103 (drift inflates SD, not moving ranges)
+    assert stability_ratio([0, 1, 2, 3, 4, 5], 1.128) == pytest.approx(2.1103, abs=1e-4)
+    # alternating 0,1: MRs all 1 -> 0.88652; SD = sqrt(1.5/5) = 0.54772 -> ratio 0.6178
+    assert stability_ratio([0, 1, 0, 1, 0, 1], 1.128) == pytest.approx(0.6178, abs=1e-4)
+
+
+def test_find_stable_window_picks_the_steady_stretch():
+    x = [0, 1, 2, 3, 4, 5] + [0, 1, 0, 1, 0, 1]
+    w = find_stable_window(np.array(x, float), size=6, step=6, d2=1.128)
+    assert (w["start"], w["end"]) == (6, 12)
+    assert w["ratio"] == pytest.approx(0.6178, abs=1e-4)
+
+
+def test_find_stable_window_includes_final_stretch():
+    # with step 4 the starts would be 0, 4 only; the last stretch (start 5) must be tried too
+    x = [0, 5, 10, 15, 20, 25, 0, 1, 0, 1, 0]
+    w = find_stable_window(np.array(x, float), size=6, step=4, d2=1.128)
+    assert w["start"] == 5
+
+
+def test_percentile_indices_hand():
+    # x = 0..1000 (1,001 values): P0.135 = 1.35, median = 500, P99.865 = 998.65
+    # LSL = -100, USL = 1100 -> Pp = 1200 / 997.3 = 1.20325
+    # Ppk = min((1100-500)/(998.65-500), (500+100)/(500-1.35)) = 600/498.65 = 1.20325
+    r = percentile_indices(np.arange(1001), -100, 1100)
+    assert r["Pp_pct"] == pytest.approx(1200 / 997.3, rel=1e-6)
+    assert r["Ppk_pct"] == pytest.approx(600 / 498.65, rel=1e-6)
+
+
+def test_anderson_darling_separates_normal_from_skewed():
+    rng = np.random.default_rng(0)
+    assert anderson_darling_p(rng.normal(size=500)) > 0.05
+    assert anderson_darling_p(rng.exponential(size=500)) < 0.001

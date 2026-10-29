@@ -1,6 +1,6 @@
 """Build everything with one command:  python run.py   (add --refresh to re-download)
 
-Pipeline: data -> clean -> analyze -> spc -> capability -> report.
+Pipeline: data -> metrics -> clean -> analyze -> improve -> spc -> capability -> report.
 """
 from __future__ import annotations
 
@@ -12,6 +12,8 @@ from src.capability import run_capability
 from src.clean import clean, dataset_overview
 from src.config import load_config, resolve
 from src.data import load_secom, sensor_columns
+from src.improve import run_improve
+from src.metrics import run_metrics
 from src.report import build_context, render
 from src.spc import run_spc
 
@@ -31,6 +33,7 @@ def main() -> None:
     # Define / Measure
     raw = load_secom(cfg, refresh=args.refresh)          # time-sorted, NOT imputed
     overview = dataset_overview(raw)
+    metrics = run_metrics(raw, cfg)                      # yield, DPMO, sigma level, drift test
     cleaning = clean(raw, cfg)
     kept = list(cleaning.missing_mask.columns)
     print(f"[measure] {len(raw)} runs, {len(kept)} sensors kept")
@@ -41,10 +44,13 @@ def main() -> None:
     plot_pareto(analysis["pareto"], analysis["pareto_figure"])
     print(f"[analyze] held-out ROC AUC {analysis['metrics']['test']['roc_auc']:.3f}")
 
+    # Improve: monitoring rule chosen on training runs, scored on later runs
+    improve = run_improve(raw, analysis["ranking"], cfg)
+
     # Control
     sensors = analysis["ranking"][: cfg["spc"]["n_sensors"]]
     spc = run_spc(raw, sensors, cfg, fig_dir)
-    capability = run_capability(raw, sensors, cfg)
+    capability = run_capability(raw, spc["charts"], cfg)
     print(f"[control] charted {', '.join(sensors)}")
 
     # Tables for anyone who wants the numbers behind the report
@@ -60,11 +66,14 @@ def main() -> None:
     spc["summary"].to_csv(out_dir / "spc_summary.csv", index=False)
     spc["p_chart"].to_csv(out_dir / "p_chart.csv", index=False)
     capability.to_csv(out_dir / "capability.csv", index=False)
+    improve.to_csv(out_dir / "improve_rules.csv", index=False)
+    analysis["corr"].to_csv(out_dir / "sensor_overlap.csv", index=False)
+    (out_dir / "ctq_metrics.json").write_text(json.dumps(metrics, indent=2, default=str))
     (out_dir / "model_metrics.json").write_text(json.dumps(
         {**analysis["metrics"], "best_C": analysis["best_C"], "n_selected": analysis["n_selected"]},
         indent=2))
 
-    path = render(build_context(cfg, overview, cleaning, analysis, spc, capability),
+    path = render(build_context(cfg, overview, metrics, cleaning, analysis, improve, spc, capability),
                   out_dir / cfg["report"]["file"])
     print(f"[report] {path}")
 

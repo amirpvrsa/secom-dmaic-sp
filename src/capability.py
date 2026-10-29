@@ -54,20 +54,54 @@ def capability_indices(x, lsl: float, usl: float, d2: float = 1.128) -> dict:
     }
 
 
-def run_capability(raw: pd.DataFrame, sensors: list[str], cfg: dict) -> pd.DataFrame:
+def anderson_darling_p(x) -> float:
+    """p-value of the Anderson-Darling normality test (small p = not normal)."""
+    from statsmodels.stats.diagnostic import normal_ad
+    x = np.asarray(x, dtype=float)
+    x = x[~np.isnan(x)]
+    if len(x) < 8 or np.ptp(x) == 0:
+        return np.nan
+    return float(normal_ad(x)[1])
+
+
+def percentile_indices(x, lsl: float, usl: float, lo_pct: float = 0.135, hi_pct: float = 99.865) -> dict:
+    """Non-normal (percentile / ISO 22514 style) performance indices.
+
+        Pp_pct  = (USL - LSL) / (P_hi - P_lo)
+        Ppk_pct = min( (USL - median) / (P_hi - median), (median - LSL) / (median - P_lo) )
+
+    P_lo, P_hi = the 0.135th and 99.865th percentiles, which bracket 99.73% of the data,
+    the same share that +/-3 sigma covers for a normal distribution. No normality assumed.
+    """
+    x = np.asarray(x, dtype=float)
+    x = x[~np.isnan(x)]
+    p_lo, med, p_hi = np.percentile(x, [lo_pct, 50, hi_pct])
+    upper = (usl - med) / (p_hi - med) if p_hi > med else np.nan
+    lower = (med - lsl) / (med - p_lo) if med > p_lo else np.nan
+    return {"Pp_pct": (usl - lsl) / (p_hi - p_lo) if p_hi > p_lo else np.nan,
+            "Ppk_pct": float(np.nanmin([upper, lower])) if not (np.isnan(upper) and np.isnan(lower)) else np.nan}
+
+
+def run_capability(raw: pd.DataFrame, spc_charts: dict, cfg: dict) -> pd.DataFrame:
+    """Capability per priority sensor. The baseline window for each sensor is the one the
+    SPC step chose, so the control chart and the capability study use the same reference."""
     c, s = cfg["capability"], cfg["spc"]
-    cut = int(round(len(raw) * s["baseline_frac"]))
-    base, later = raw.iloc[:cut], raw.iloc[cut:]
+    pos = np.arange(len(raw))
     rows = []
-    for sensor in sensors:
-        lsl, usl = derive_spec_limits(base.loc[base["fail"] == 0, sensor].to_numpy(), c)
-        for label, part in (("baseline, passing runs", base[base["fail"] == 0]),
-                            ("after baseline, all runs", later),
-                            ("after baseline, passing runs", later[later["fail"] == 0]),
-                            ("after baseline, failing runs", later[later["fail"] == 1])):
-            vals = part[sensor].to_numpy()
-            if np.sum(~np.isnan(vals)) < 3:
+    for sensor, chart in spc_charts.items():
+        start, end = chart["baseline_pos"]
+        in_win = (pos >= start) & (pos <= end)
+        passing = raw["fail"].to_numpy() == 0
+        lsl, usl = derive_spec_limits(raw.loc[in_win & passing, sensor].to_numpy(), c)
+        for label, mask in (("baseline window, passing runs", in_win & passing),
+                            ("baseline window, failing runs", in_win & ~passing),
+                            ("outside baseline window, all runs", ~in_win)):
+            vals = raw.loc[mask, sensor].to_numpy()
+            if np.sum(~np.isnan(vals)) < 8:
                 continue
-            rows.append({"sensor": sensor, "period": label, "lsl_assumed": lsl,
-                         "usl_assumed": usl, **capability_indices(vals, lsl, usl, s["d2"])})
+            ad_p = anderson_darling_p(vals)
+            rows.append({"sensor": sensor, "period": label, "lsl_assumed": lsl, "usl_assumed": usl,
+                         **capability_indices(vals, lsl, usl, s["d2"]),
+                         "ad_p": ad_p, "normal": bool(ad_p >= c["normality_alpha"]) if not np.isnan(ad_p) else False,
+                         **percentile_indices(vals, lsl, usl, c["lower_percentile"], c["upper_percentile"])})
     return pd.DataFrame(rows)

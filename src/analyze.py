@@ -125,6 +125,22 @@ def missing_patterns_summary(miss: pd.DataFrame) -> pd.DataFrame:
     }).reset_index().sort_values("fisher_q").reset_index(drop=True)
 
 
+def correlated_pairs(X: pd.DataFrame, threshold: float, min_periods: int = 30) -> pd.DataFrame:
+    """Spearman rank correlation between every pair of sensors in X (pairwise, measured
+    values only). Pairs with |rho| >= threshold probably carry the same signal."""
+    rho = X.corr(method="spearman", min_periods=min_periods)
+    rows = []
+    cols = list(X.columns)
+    for i in range(len(cols)):
+        for j in range(i + 1, len(cols)):
+            r = rho.iloc[i, j]
+            if not np.isnan(r):
+                rows.append({"sensor_a": cols[i], "sensor_b": cols[j], "rho": float(r),
+                             "overlap": bool(abs(r) >= threshold)})
+    out = pd.DataFrame(rows, columns=["sensor_a", "sensor_b", "rho", "overlap"])
+    return out.reindex(out["rho"].abs().sort_values(ascending=False).index).reset_index(drop=True)
+
+
 # ---------------------------------------------------------------- 3. L1 logistic model
 
 def time_split(n: int, holdout_frac: float) -> tuple[np.ndarray, np.ndarray]:
@@ -272,6 +288,9 @@ def run_analysis(raw: pd.DataFrame, kept: list[str], all_sensors: list[str], cfg
     screen = screen_sensors(X, y, a["min_group_n"], a["fdr_q"])
     miss = missingness_screen(raw[all_sensors], y, a["missing_min_count"], a["fdr_q"])
     patterns = missing_patterns_summary(miss)
+    sig_sensors = screen.loc[screen["significant_both"], "sensor"].tolist()
+    corr = correlated_pairs(X[sig_sensors], a["corr_threshold"]) if len(sig_sensors) > 1 else \
+        pd.DataFrame(columns=["sensor_a", "sensor_b", "rho", "overlap"])
 
     tr, te = time_split(len(raw), a["holdout_frac"])
     model, cv = fit_l1_model(X.iloc[tr], y.iloc[tr], a)
@@ -283,11 +302,10 @@ def run_analysis(raw: pd.DataFrame, kept: list[str], all_sensors: list[str], cfg
     pareto = pareto_table(coef, freq, a["pareto_top_n"])
 
     return {
-        "screen": screen, "missingness": miss, "missing_patterns": patterns,
+        "screen": screen, "missingness": miss, "missing_patterns": patterns, "corr": corr,
         "cv": cv, "best_C": best_C, "metrics": metrics, "coef": coef, "freq": freq,
         "pareto": pareto, "ranking": rank_sensors(pareto, screen),
         "n_selected": int((coef != 0).sum()),
-        "raw_fail": y.to_numpy(),
         "split": {"train_end": raw["timestamp"].iloc[tr[-1]], "test_start": raw["timestamp"].iloc[te[0]],
                   "n_train": len(tr), "n_test": len(te)},
     }
