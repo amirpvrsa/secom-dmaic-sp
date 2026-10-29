@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+# downloaded data and generated outputs are rebuilt by run.py, not committed
+data/cache/
+data/raw/*
+!data/raw/.gitkeep
+outputs/*
+!outputs/.gitkeep

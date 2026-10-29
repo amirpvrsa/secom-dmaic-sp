@@ -1,0 +1,42 @@
+# secom-dmaic-spc configuration
+# Every threshold and analysis choice lives here. Code reads these values;
+# nothing in src/ should hardcode a number that changes the result.
+
+data:
+  uci_id: 179                     # UCI ML Repository dataset id for SECOM
+  cache_dir: data/cache           # fetched data is cached here (gitignored)
+  cache_file: secom.csv.gz
+  # Optional: folder holding the original UCI files secom.data and
+  # secom_labels.data. If both files exist here they are used instead of
+  # downloading. Useful when the UCI API is unreachable.
+  raw_dir: data/raw
+  # Label coding in SECOM: -1 = pass, 1 = fail
+  pass_value: -1
+  fail_value: 1
+  # Timestamp format in secom_labels.data, e.g. "19/07/2008 11:55:00" (day first).
+  # Parsing is strict: if a value does not match, the run stops with an error
+  # rather than guessing day/month order.
+  timestamp_format: "%d/%m/%Y %H:%M:%S"
+
+clean:
+  # A sensor is dropped when its fraction of missing values is STRICTLY
+  # greater than this. 0.50 means "more than half the runs are missing".
+  max_missing_frac: 0.50
+  # A sensor is dropped as constant when it has <= this many distinct
+  # non-missing values (1 = a single value repeated).
+  constant_max_unique: 1
+  # A sensor is dropped as near-constant when its single most common
+  # non-missing value accounts for >= this fraction of its non-missing values.
+  # Kept deliberately strict (0.99): with a ~6.6% fail rate, a looser cutoff
+  # (e.g. 0.95) could discard a sensor whose rare deviations line up with fails.
+  near_constant_dominant_frac: 0.99
+  # How remaining missing values are filled: "median" or "mean".
+  impute_strategy: median
+
+outputs:
+  dir: outputs
+  overview: data_overview.csv                   # run-level facts (runs, fail rate, date range)
+  quality_summary: data_quality_summary.csv     # one row per cleaning step
+  quality_by_sensor: data_quality_by_sensor.csv # one row per sensor, with decision
+  clean_data: secom_clean.csv.gz
+  missing_mask: secom_missing_mask.csv.gz       # True where a value was imputed
