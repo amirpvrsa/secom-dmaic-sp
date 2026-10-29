@@ -28,11 +28,23 @@ jobs:
           path: data/cache
           key: secom-${{ hashFiles('config.yaml') }}
 
-      - name: Build outputs
+      # Use the original UCI files (they carry the timestamps). data.py reads them from
+      # data/raw when present; otherwise it falls back to the ucimlrepo download.
+      - name: Get SECOM original files from UCI
+        if: hashFiles('data/cache/secom.csv.gz') == ''
+        run: |
+          curl -fsSL -o secom.zip https://archive.ics.uci.edu/static/public/179/secom.zip
+          unzip -o secom.zip -d data/raw
+
+      - name: Build report
         run: python run.py
 
-      - name: Upload outputs
+      - name: Upload report and tables
         uses: actions/upload-artifact@v4
         with:
-          name: outputs
-          path: outputs/
+          name: secom-dmaic-report
+          path: |
+            outputs/*.html
+            outputs/*.csv
+            outputs/*.json
+            outputs/figures/

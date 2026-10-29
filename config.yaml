@@ -33,6 +33,67 @@ clean:
   # How remaining missing values are filled: "median" or "mean".
   impute_strategy: median
 
+analyze:
+  # False discovery rate for Benjamini-Hochberg (share of "significant" sensors
+  # we accept could be false positives). 0.05 = 5%.
+  fdr_q: 0.05
+  # A sensor is only screened if each group (pass, fail) has at least this many
+  # MEASURED (non-imputed) values. Screening uses measured values only.
+  min_group_n: 10
+  # Missingness screen: tests whether runs where a sensor is missing fail at a
+  # different rate than runs where it was measured (Fisher's exact test, BH-corrected).
+  # Only sensors with at least this many missing runs are tested.
+  missing_min_count: 20
+  # L1 logistic regression (Lasso-style). Imputation and scaling are fitted on
+  # the training runs only, inside the model pipeline, so test runs never leak in.
+  holdout_frac: 0.30          # the LAST 30% of runs in time are held out for testing
+  cv_folds: 5                 # time-ordered folds used to choose regularization strength
+  C_grid: [0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5]   # smaller C = stronger L1 = fewer sensors
+  class_weight: balanced      # weight fails up so the model does not just predict "pass"
+  cv_scoring: average_precision
+  # Stability check: refit the chosen model on this many bootstrap resamples of the
+  # training runs and count how often each sensor is selected (non-zero coefficient).
+  bootstrap_n: 200
+  random_seed: 42
+  pareto_top_n: 15            # sensors shown on the Pareto chart
+
+spc:
+  # Charts are drawn for the top N sensors from the analysis ranking.
+  n_sensors: 4
+  # Phase I baseline: control limits are calculated from PASSING runs in the first
+  # part of the timeline, then applied to every run (Phase II monitoring).
+  baseline_frac: 0.50
+  sigma_multiplier: 3
+  d2: 1.128                   # bias constant for moving range of 2 (n=2)
+  D4: 3.267                   # MR chart upper limit constant for n=2
+  # Western Electric rules to flag (all four standard rules)
+  rules: [1, 2, 3, 4]
+  # p-chart of fail rate: runs are grouped into periods of this length
+  # (pandas frequency: "W" = calendar week ending Sunday, "D" = day)
+  p_chart_period: "W"
+
+capability:
+  # SECOM HAS NO SPECIFICATION LIMITS. Limits used here are ASSUMED: derived from
+  # passing runs in the baseline window (same window as SPC). Capability then asks
+  # "how well does the rest of production stay inside the envelope the passing
+  # baseline runs occupied?" - not "does it meet engineering specs".
+  # mean_sd: LSL/USL = baseline passing mean -/+ k * standard deviation.
+  # percentile: LSL/USL = the given percentiles of baseline passing runs. With ~700
+  # baseline runs, the 0.135/99.865 percentiles are essentially the min and max,
+  # which makes them noisy - so mean_sd is the default.
+  spec_method: mean_sd        # "mean_sd" or "percentile"
+  mean_sd_k: 3
+  lower_percentile: 0.135     # used only when spec_method is percentile
+  upper_percentile: 99.865
+
+report:
+  title: "SECOM wafer fab: a DMAIC analysis of sensor data against yield failures"
+  file: secom_dmaic_report.html
+  screen_rows: 10             # rows shown in the screening table
+  # Wording thresholds: the report's conclusions switch on these, not on hand-typed text.
+  min_useful_auc: 0.60        # held-out ROC AUC below this = "no useful predictive power"
+  max_stability_ratio: 1.30   # baseline SD_overall / SD_within above this = "baseline not stable"
+
 outputs:
   dir: outputs
   overview: data_overview.csv                   # run-level facts (runs, fail rate, date range)
